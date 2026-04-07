@@ -76,14 +76,14 @@ jobs:
           docker run --rm -v "${{ github.workspace }}":/work -w /work archlinux:latest /bin/bash -lc "pacman -Sy --noconfirm --needed base-devel cmake ninja glfw glm pkgconf || true; mkdir -p build && cd build && cmake .. -G Ninja -DUSE_VULKAN=OFF && ninja && mkdir -p /work/artifacts && cp photon /work/artifacts/photon-arch || true"
 
       - name: Upload Fedora artifact
-        if: exists('artifacts/photon-fedora')
+        if: always()
         uses: actions/upload-artifact@v3
         with:
           name: photon-fedora
           path: artifacts/photon-fedora
 
       - name: Upload Arch artifact
-        if: exists('artifacts/photon-arch')
+        if: always()
         uses: actions/upload-artifact@v3
         with:
           name: photon-arch
@@ -140,8 +140,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Windows asset
-        if: steps.create_release.outcome == 'success' && (exists('downloads/windows') )
+        if: steps.create_release.outcome == 'success'
         uses: actions/upload-release-asset@v1
+        continue-on-error: true
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: downloads/windows
@@ -151,8 +152,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Ubuntu asset
-        if: steps.create_release.outcome == 'success' && (exists('downloads/ubuntu') )
+        if: steps.create_release.outcome == 'success'
         uses: actions/upload-release-asset@v1
+        continue-on-error: true
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: downloads/ubuntu
@@ -162,8 +164,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload macOS asset
-        if: steps.create_release.outcome == 'success' && (exists('downloads/macos') )
+        if: steps.create_release.outcome == 'success'
         uses: actions/upload-release-asset@v1
+        continue-on-error: true
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: downloads/macos
@@ -173,8 +176,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Fedora asset
-        if: steps.create_release.outcome == 'success' && (exists('downloads/fedora') )
+        if: steps.create_release.outcome == 'success'
         uses: actions/upload-release-asset@v1
+        continue-on-error: true
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: downloads/fedora
@@ -184,8 +188,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Arch asset
-        if: steps.create_release.outcome == 'success' && (exists('downloads/arch') )
+        if: steps.create_release.outcome == 'success'
         uses: actions/upload-release-asset@v1
+        continue-on-error: true
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: downloads/arch
