@@ -9,138 +9,190 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-matrix:
-    name: Build on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            artifact: photon-windows.exe
-            binary: build/photon.exe
-          - os: ubuntu-latest
-            artifact: photon-ubuntu
-            binary: build/photon
-          - os: macos-latest
-            artifact: photon-macos
-            binary: build/photon
-
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup dependencies (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Setup vcpkg & deps
         shell: pwsh
         run: |
           git clone https://github.com/microsoft/vcpkg.git vcpkg
           .\vcpkg\bootstrap-vcpkg.bat
           .\vcpkg\vcpkg.exe install glfw3:x64-windows glm:x64-windows --recurse
 
-      - name: Setup dependencies (macOS)
-        if: matrix.os == 'macos-latest'
-        run: brew update || true && brew install cmake ninja pkg-config glfw glm || true
-
-      - name: Setup dependencies (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build libglfw3-dev libglm-dev pkg-config
-
-      - name: Configure and build (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Build
         shell: pwsh
         run: |
-          mkdir build
-          cd build
-          $toolchain = "${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake"
-          cmake .. -G "Ninja" -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DUSE_VULKAN=OFF
+          mkdir build; cd build
+          cmake .. -G "Ninja" `
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake" `
+            -DUSE_VULKAN=OFF
           ninja
 
-      - name: Configure and build (Linux/macOS)
-        if: matrix.os != 'windows-latest'
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: photon-windows
+          path: build/photon.exe
+
+  build-ubuntu:
+    name: Build Ubuntu (.deb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build \
+            libglfw3-dev libglm-dev pkg-config
+
+      - name: Build
         run: |
           mkdir -p build && cd build
           cmake .. -G Ninja -DUSE_VULKAN=OFF
           ninja
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: photon-${{ matrix.os }}
-          path: ${{ matrix.binary }}
-          if-no-files-found: warn
-
-  container-builds:
-    name: Build on ${{ matrix.distro }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - distro: fedora
-            image: fedora:latest
-            install: dnf -y install cmake make gcc gcc-c++ ninja-build glfw-devel glm-devel pkgconfig
-          - distro: arch
-            image: archlinux:latest
-            install: pacman -Sy --noconfirm --needed base-devel cmake ninja glfw glm pkgconf
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build in ${{ matrix.distro }} container
+      - name: Package .deb
         run: |
-          docker run --rm -v "${{ github.workspace }}":/work -w /work ${{ matrix.image }} /bin/bash -lc "
-            ${{ matrix.install }} &&
-            mkdir -p build && cd build &&
-            cmake .. -G Ninja -DUSE_VULKAN=OFF &&
-            ninja
-          " || true
+          mkdir -p pkg/DEBIAN pkg/usr/bin pkg/usr/share/photon/shaders
+          cp build/photon pkg/usr/bin/photon
+          cp -r shaders/* pkg/usr/share/photon/shaders/ || true
+          cat > pkg/DEBIAN/control << EOF
+          Package: photon
+          Version: 0.1.${{ github.run_number }}
+          Architecture: amd64
+          Maintainer: Freeman <Freeman@hal.lf>
+          Description: Photon - Adaptive Hybrid Ray Tracer
+          EOF
+          dpkg-deb --build pkg photon-ubuntu-amd64.deb
 
-      - name: Upload ${{ matrix.distro }} artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: photon-${{ matrix.distro }}
-          path: build/photon
-          if-no-files-found: warn
+          name: photon-ubuntu
+          path: photon-ubuntu-amd64.deb
 
-  create_release:
+  build-fedora:
+    name: Build Fedora (.rpm)
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          dnf -y install cmake make gcc gcc-c++ ninja-build \
+            glfw-devel glm-devel pkgconfig rpm-build
+
+      - name: Build
+        run: |
+          mkdir -p build && cd build
+          cmake .. -G Ninja -DUSE_VULKAN=OFF
+          ninja
+
+      - name: Package .rpm
+        run: |
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          install -Dm755 build/photon rpmbuild/BUILD/photon
+          cat > rpmbuild/SPECS/photon.spec << 'SPEC'
+          Name:    photon
+          Version: 0.1.${{ github.run_number }}
+          Release: 1
+          Summary: Photon - Adaptive Hybrid Ray Tracer
+          License: MIT
+          BuildArch: x86_64
+
+          %description
+          Photon adaptive hybrid ray tracer.
+
+          %install
+          mkdir -p %{buildroot}/usr/bin
+          install -m 755 %{_builddir}/photon %{buildroot}/usr/bin/photon
+
+          %files
+          /usr/bin/photon
+          SPEC
+          rpmbuild --define "_topdir $(pwd)/rpmbuild" -bb rpmbuild/SPECS/photon.spec
+          find rpmbuild/RPMS -name "*.rpm" -exec cp {} photon-fedora-x86_64.rpm \;
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: photon-fedora
+          path: photon-fedora-x86_64.rpm
+
+  build-arch:
+    name: Build Arch Linux
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          pacman -Sy --noconfirm --needed base-devel cmake ninja glfw glm pkgconf
+
+      - name: Build
+        run: |
+          mkdir -p build && cd build
+          cmake .. -G Ninja -DUSE_VULKAN=OFF
+          ninja
+
+      - name: Package tarball
+        run: |
+          mkdir -p photon-arch/usr/bin
+          cp build/photon photon-arch/usr/bin/photon
+          tar -czvf photon-arch-x86_64.tar.gz photon-arch/
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: photon-arch
+          path: photon-arch-x86_64.tar.gz
+
+  release:
     name: Create Release
-    needs: [build-matrix, container-builds]
+    needs: [build-windows, build-ubuntu, build-fedora, build-arch]
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: downloads
+          path: artifacts
 
       - name: List artifacts
-        run: ls -R downloads || true
+        run: find artifacts -type f | sort
 
-      - name: Rename artifacts for release
-        run: |
-          mkdir -p release-assets
-          [ -f downloads/photon-windows-latest/photon.exe ] && cp downloads/photon-windows-latest/photon.exe release-assets/photon-windows.exe || true
-          [ -f downloads/photon-ubuntu-latest/photon ]     && cp downloads/photon-ubuntu-latest/photon     release-assets/photon-ubuntu    || true
-          [ -f downloads/photon-macos-latest/photon ]      && cp downloads/photon-macos-latest/photon      release-assets/photon-macos     || true
-          [ -f downloads/photon-fedora/photon ]            && cp downloads/photon-fedora/photon            release-assets/photon-fedora    || true
-          [ -f downloads/photon-arch/photon ]              && cp downloads/photon-arch/photon              release-assets/photon-arch      || true
-          ls -la release-assets || true
-
-      - name: Create GitHub Release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.run_number }}
-          name: Release v${{ github.run_number }}
+          tag_name: v0.1.${{ github.run_number }}
+          name: "Photon v0.1.${{ github.run_number }}"
           body: |
-            Automated cross-platform release.
-            
-            **Platforms:** Windows, Ubuntu, macOS, Fedora, Arch
+            ## Photon Ray Tracer — Automated Release
+
+            ### Downloads
+            | Platform | File |
+            |----------|------|
+            | Windows  | `photon-windows.exe` |
+            | Ubuntu/Debian | `photon-ubuntu-amd64.deb` |
+            | Fedora   | `photon-fedora-x86_64.rpm` |
+            | Arch Linux | `photon-arch-x86_64.tar.gz` |
+
             **Commit:** ${{ github.sha }}
           draft: false
           prerelease: false
-          files: release-assets/*
+          fail_on_unmatched_files: false
+          files: |
+            artifacts/photon-windows/photon.exe
+            artifacts/photon-ubuntu/photon-ubuntu-amd64.deb
+            artifacts/photon-fedora/photon-fedora-x86_64.rpm
+            artifacts/photon-arch/photon-arch-x86_64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 
