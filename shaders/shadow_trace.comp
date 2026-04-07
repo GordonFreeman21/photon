@@ -1,0 +1,162 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+
+/*
+ * Photon - Shadow Ray Tracing Compute Shader
+ * Traces shadow rays from G-buffer surface points toward lights
+ * Outputs: shadow mask texture (0 = shadowed, 1 = lit)
+ */
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+#include "bvh_common.glsl"
+
+/* G-Buffer inputs */
+layout(set = 1, binding = 0) uniform sampler2D gbuf_depth;
+layout(set = 1, binding = 1) uniform sampler2D gbuf_normal_rm;
+
+/* Output shadow mask */
+layout(set = 1, binding = 2, r8) uniform writeonly image2D shadow_mask;
+
+/* Camera and light data */
+layout(set = 2, binding = 0) uniform FrameUBO {
+    mat4 inv_view_projection;
+    vec4 camera_position;
+    vec4 sun_direction;     // xyz = direction toward sun, w = angular diameter
+    vec4 sun_color;         // xyz = color, w = intensity
+    uvec4 screen_dims;      // x = width, y = height, z = frame_number, w = ray_budget
+    vec4 tile_info;         // x = tile_size, y = tiles_x, z = tiles_y
+} frame;
+
+/* Ray budget per tile */
+layout(std430, binding = 4) readonly buffer TileBudgets {
+    float tile_multipliers[];
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  Reconstruct world position from depth                                     */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+vec3 reconstruct_world_pos(vec2 uv, float depth) {
+    vec4 clip = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    clip.y = -clip.y; // Vulkan y-flip
+    vec4 world = frame.inv_view_projection * clip;
+    return world.xyz / world.w;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  Decode octahedral normal                                                  */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+vec3 octahedral_decode(vec2 e) {
+    e = e * 2.0 - 1.0;
+    vec3 n = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) {
+        n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return normalize(n);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  Quasi-random sampling for soft shadows                                    */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+float halton(uint index, uint base) {
+    float f = 1.0;
+    float r = 0.0;
+    uint i = index;
+    while (i > 0u) {
+        f /= float(base);
+        r += f * float(i % base);
+        i /= base;
+    }
+    return r;
+}
+
+vec3 perturb_direction(vec3 dir, float angular_radius, vec2 rand_sample) {
+    if (angular_radius < 0.001) return dir;
+    
+    /* Build tangent frame */
+    vec3 up = abs(dir.y) < 0.999 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+    vec3 tangent = normalize(cross(up, dir));
+    vec3 bitangent = cross(dir, tangent);
+    
+    /* Uniform disk sample scaled by angular radius */
+    float r = sqrt(rand_sample.x) * angular_radius;
+    float phi = rand_sample.y * 6.28318530718;
+    
+    return normalize(dir + tangent * (r * cos(phi)) + bitangent * (r * sin(phi)));
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  Main                                                                      */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixel.x >= int(frame.screen_dims.x) || pixel.y >= int(frame.screen_dims.y))
+        return;
+    
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(frame.screen_dims.xy);
+    
+    /* Read G-buffer */
+    float depth = texture(gbuf_depth, uv).r;
+    
+    /* Skip sky pixels */
+    if (depth >= 1.0) {
+        imageStore(shadow_mask, pixel, vec4(1.0));
+        return;
+    }
+    
+    vec4 normal_rm = texture(gbuf_normal_rm, uv);
+    vec3 N = octahedral_decode(normal_rm.rg);
+    vec3 world_pos = reconstruct_world_pos(uv, depth);
+    
+    /* Check tile budget */
+    uint tile_x = uint(pixel.x) / uint(frame.tile_info.x);
+    uint tile_y = uint(pixel.y) / uint(frame.tile_info.x);
+    uint tile_idx = tile_y * uint(frame.tile_info.y) + tile_x;
+    float multiplier = tile_multipliers[tile_idx];
+    
+    /* Checkerboard: skip pixels based on frame parity and budget */
+    if (multiplier < 0.5) {
+        uint checker = (uint(pixel.x) + uint(pixel.y) + frame.screen_dims.z) & 1u;
+        if (checker == 0u) {
+            imageStore(shadow_mask, pixel, vec4(0.5)); // unknown, will be filled by denoise
+            return;
+        }
+    }
+    
+    /* Construct shadow ray */
+    vec3 light_dir = normalize(frame.sun_direction.xyz);
+    float NdotL = dot(N, light_dir);
+    
+    /* Back-face: definitely in shadow */
+    if (NdotL <= 0.0) {
+        imageStore(shadow_mask, pixel, vec4(0.0));
+        return;
+    }
+    
+    /* Soft shadow: perturb direction based on sun angular diameter */
+    uint seed = uint(pixel.x) * 1973u + uint(pixel.y) * 9277u + frame.screen_dims.z * 26699u;
+    vec2 rand_sample = vec2(halton(seed, 2u), halton(seed, 3u));
+    vec3 shadow_dir = perturb_direction(light_dir, frame.sun_direction.w, rand_sample);
+    
+    /* Bias origin along normal to prevent self-intersection */
+    vec3 ray_origin = world_pos + N * 0.01;
+    
+    Ray shadow_ray;
+    shadow_ray.origin = ray_origin;
+    shadow_ray.direction = shadow_dir;
+    shadow_ray.inv_direction = 1.0 / shadow_dir;
+    shadow_ray.tmin = 0.001;
+    shadow_ray.tmax = 10000.0;
+    shadow_ray.pixel_index = uint(pixel.y * int(frame.screen_dims.x) + pixel.x);
+    
+    /* Trace shadow ray (any-hit) */
+    bool in_shadow = traverse_bvh_any(shadow_ray);
+    
+    float visibility = in_shadow ? 0.0 : 1.0;
+    imageStore(shadow_mask, pixel, vec4(visibility));
+}

@@ -1,0 +1,170 @@
+#version 450
+
+/*
+ * Photon - Temporal Denoiser Compute Shader
+ * Reprojects previous frame using motion vectors, blends with current frame
+ * Implements variance clipping to prevent ghosting
+ */
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+/* Current frame (spatially denoised) */
+layout(set = 0, binding = 0) uniform sampler2D current_color;
+
+/* Previous frame (temporal accumulation result) */
+layout(set = 0, binding = 1) uniform sampler2D history_color;
+
+/* G-Buffer */
+layout(set = 0, binding = 2) uniform sampler2D gbuf_motion_depth; // RG = motion vectors
+layout(set = 0, binding = 3) uniform sampler2D gbuf_depth;
+layout(set = 0, binding = 4) uniform sampler2D gbuf_normal_rm;
+layout(set = 0, binding = 5) uniform sampler2D prev_depth;
+
+/* Output */
+layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D output_color;
+layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D output_moments; // for variance estimation
+
+/* Parameters */
+layout(push_constant) uniform TemporalParams {
+    float blend_factor;     // 0.9 = 90% history
+    float depth_threshold;  // disocclusion depth threshold
+    float normal_threshold; // disocclusion normal threshold
+    uvec2 screen_dims;
+} params;
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  Helpers                                                                   */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+vec3 octahedral_decode(vec2 e) {
+    e = e * 2.0 - 1.0;
+    vec3 n = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) {
+        n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return normalize(n);
+}
+
+float luminance(vec3 c) {
+    return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  Variance Clipping (AABB in color space)                                   */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+vec3 variance_clip(vec3 history, vec3 current, vec2 uv) {
+    vec2 texel_size = 1.0 / vec2(params.screen_dims);
+    
+    /* Compute 3×3 neighborhood statistics */
+    vec3 m1 = vec3(0.0);
+    vec3 m2 = vec3(0.0);
+    
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            vec2 offset = vec2(dx, dy) * texel_size;
+            vec3 s = texture(current_color, uv + offset).rgb;
+            m1 += s;
+            m2 += s * s;
+        }
+    }
+    
+    m1 /= 9.0;
+    m2 /= 9.0;
+    
+    vec3 sigma = sqrt(max(m2 - m1 * m1, vec3(0.0)));
+    
+    /* Clamp history to neighborhood AABB (mean ± 1.5 * sigma) */
+    vec3 aabb_min = m1 - sigma * 1.5;
+    vec3 aabb_max = m1 + sigma * 1.5;
+    
+    return clamp(history, aabb_min, aabb_max);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  Disocclusion Detection                                                    */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+bool is_disoccluded(vec2 current_uv, vec2 history_uv) {
+    /* Check if history UV is within screen bounds */
+    if (history_uv.x < 0.0 || history_uv.x > 1.0 ||
+        history_uv.y < 0.0 || history_uv.y > 1.0)
+        return true;
+    
+    /* Depth-based disocclusion */
+    float current_depth = texture(gbuf_depth, current_uv).r;
+    float prev_depth_val = texture(prev_depth, history_uv).r;
+    
+    if (abs(current_depth - prev_depth_val) > params.depth_threshold)
+        return true;
+    
+    /* Normal-based disocclusion */
+    vec3 current_normal = octahedral_decode(texture(gbuf_normal_rm, current_uv).rg);
+    /* Use current normal buffer for previous (simplified - production would store prev normals) */
+    vec3 prev_normal = octahedral_decode(texture(gbuf_normal_rm, history_uv).rg);
+    
+    if (dot(current_normal, prev_normal) < params.normal_threshold)
+        return true;
+    
+    return false;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  Main                                                                      */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixel.x >= int(params.screen_dims.x) || pixel.y >= int(params.screen_dims.y))
+        return;
+    
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(params.screen_dims);
+    
+    /* Read current frame color */
+    vec3 current = texture(current_color, uv).rgb;
+    
+    /* Read motion vectors and compute history UV */
+    vec2 motion = texture(gbuf_motion_depth, uv).rg;
+    vec2 history_uv = uv - motion;
+    
+    /* Check for disocclusion */
+    bool disoccluded = is_disoccluded(uv, history_uv);
+    
+    vec3 result;
+    float blend;
+    
+    if (disoccluded) {
+        /* No valid history: use current frame (accept noise) */
+        result = current;
+        blend = 0.0;
+    } else {
+        /* Read and clip history */
+        vec3 history = texture(history_color, history_uv).rgb;
+        history = variance_clip(history, current, uv);
+        
+        /* Exponential moving average */
+        blend = params.blend_factor;
+        result = mix(current, history, blend);
+    }
+    
+    /* Compute moments for SVGF variance estimation */
+    float lum = luminance(result);
+    vec2 moments = vec2(lum, lum * lum);
+    
+    /* Read previous moments and accumulate */
+    if (!disoccluded) {
+        vec2 prev_moments = texture(history_color, history_uv).ba;
+        /* Fallback if no moment data stored */
+        if (prev_moments.x == 0.0 && prev_moments.y == 0.0) {
+            prev_moments = moments;
+        }
+        moments = mix(moments, prev_moments, blend);
+    }
+    
+    /* Variance = E[x²] - E[x]² */
+    float variance = max(0.0, moments.y - moments.x * moments.x);
+    
+    imageStore(output_color, pixel, vec4(result, 1.0));
+    imageStore(output_moments, pixel, vec4(moments, variance, blend));
+}

@@ -1,0 +1,7 @@
+C:/Users/Agent47/Documents/Projects/Photon/build/CMakeFiles/photon.dir
+C:/Users/Agent47/Documents/Projects/Photon/build/CMakeFiles/edit_cache.dir
+C:/Users/Agent47/Documents/Projects/Photon/build/CMakeFiles/rebuild_cache.dir
+C:/Users/Agent47/Documents/Projects/Photon/build/CMakeFiles/list_install_components.dir
+C:/Users/Agent47/Documents/Projects/Photon/build/CMakeFiles/install.dir
+C:/Users/Agent47/Documents/Projects/Photon/build/CMakeFiles/install/local.dir
+C:/Users/Agent47/Documents/Projects/Photon/build/CMakeFiles/install/strip.dir

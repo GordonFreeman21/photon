@@ -10,11 +10,23 @@ Write-Host "=== Photon: Windows build helper ==="
 # winget install --id Ninja -e --accept-package-agreements --accept-source-agreements
 # winget install --id LunarG.VulkanSDK -e --accept-package-agreements --accept-source-agreements
 
-# 2) Bootstrap vcpkg (if missing)
-$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Definition
+# 2) Compute repo root and bootstrap vcpkg (if missing)
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$repoRoot = Split-Path -Parent $scriptDir   # one level up from scripts/
 $vcpkgRoot = Join-Path $repoRoot "vcpkg"
+
+# Ensure Ninja is available (vcpkg uses ninja during configure)
+if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+    Write-Host "Ninja not found in PATH. Attempting to install Ninja via winget (may require Admin)..."
+    try {
+        winget install --id "Ninja" -e --accept-package-agreements --accept-source-agreements -h
+    } catch {
+        Write-Host "winget install failed or not available — if build fails, please install Ninja manually and re-run this script."
+    }
+}
+
 if (-not (Test-Path $vcpkgRoot)) {
-    Write-Host "Cloning vcpkg..."
+    Write-Host "Cloning vcpkg into $vcpkgRoot..."
     git clone https://github.com/microsoft/vcpkg.git $vcpkgRoot
     & "$vcpkgRoot\bootstrap-vcpkg.bat"
 }
