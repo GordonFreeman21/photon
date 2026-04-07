@@ -1,4 +1,4 @@
-name: Build and Release
+name: Multi-platform Build & Release
 
 permissions:
   contents: write
@@ -9,50 +9,187 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-release:
-    runs-on: windows-latest
+  build-matrix:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup vcpkg
+      - name: Setup dependencies (Windows)
+        if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           git clone https://github.com/microsoft/vcpkg.git vcpkg
           .\vcpkg\bootstrap-vcpkg.bat
-
-      - name: Install deps (vcpkg)
-        shell: pwsh
-        run: |
           .\vcpkg\vcpkg.exe install glfw3:x64-windows glm:x64-windows --recurse
 
-      - name: Configure and build
-        shell: pwsh
+      - name: Setup dependencies (macOS)
+        if: matrix.os == 'macos-latest'
         run: |
-          mkdir build
+          brew update || true
+          brew install cmake ninja pkg-config glfw glm || true
+
+      - name: Setup dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build libglfw3-dev libglm-dev pkg-config || true
+
+      - name: Configure and build
+        run: |
+          mkdir -p build
           cd build
-          $toolchain = "${{ github.workspace }}\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake"
-          cmake .. -G "Ninja" -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DUSE_VULKAN=OFF
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            $toolchain="${{ github.workspace }}\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake"
+            cmake .. -G "Ninja" -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DUSE_VULKAN=OFF
+          else
+            cmake .. -G Ninja -DUSE_VULKAN=OFF
+          fi
           ninja
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: photon-${{ matrix.os }}
+          path: build/photon*
+
+  container-builds:
+    name: Container distro builds (Fedora, Arch)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure artifacts dir
+        run: mkdir -p artifacts
+
+      - name: Build in Fedora container
+        run: |
+          docker run --rm -v "${{ github.workspace }}":/work -w /work fedora:latest /bin/bash -lc "dnf -y install cmake make gcc gcc-c++ ninja-build glfw-devel glm-devel pkgconfig && mkdir -p build && cd build && cmake .. -G Ninja -DUSE_VULKAN=OFF && ninja && mkdir -p /work/artifacts && cp photon /work/artifacts/photon-fedora || true"
+
+      - name: Build in Arch container
+        run: |
+          docker run --rm -v "${{ github.workspace }}":/work -w /work archlinux:latest /bin/bash -lc "pacman -Sy --noconfirm --needed base-devel cmake ninja glfw glm pkgconf || true; mkdir -p build && cd build && cmake .. -G Ninja -DUSE_VULKAN=OFF && ninja && mkdir -p /work/artifacts && cp photon /work/artifacts/photon-arch || true"
+
+      - name: Upload Fedora artifact
+        if: exists('artifacts/photon-fedora')
+        uses: actions/upload-artifact@v3
+        with:
+          name: photon-fedora
+          path: artifacts/photon-fedora
+
+      - name: Upload Arch artifact
+        if: exists('artifacts/photon-arch')
+        uses: actions/upload-artifact@v3
+        with:
+          name: photon-arch
+          path: artifacts/photon-arch
+
+  create_release:
+    name: Create Release and attach artifacts
+    needs: [build-matrix, container-builds]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: photon-windows-latest
+          path: downloads/windows
+
+      - name: Download Ubuntu artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: photon-ubuntu-latest
+          path: downloads/ubuntu
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: photon-macos-latest
+          path: downloads/macos
+
+      - name: Download Fedora artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: photon-fedora
+          path: downloads/fedora
+
+      - name: Download Arch artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: photon-arch
+          path: downloads/arch
+
+      - name: List downloaded artifacts
+        run: ls -R downloads || true
 
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
         with:
           tag_name: v${{ github.run_number }}-${{ github.sha }}
-          release_name: Release ${{ github.ref_name }}-${{ github.run_number }}
-          body: Automated release by CI
+          release_name: Automated Release ${{ github.ref_name }}-${{ github.run_number }}
+          body: Automated cross-platform build artifacts
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload release asset
+      - name: Upload Windows asset
+        if: steps.create_release.outcome == 'success' && (exists('downloads/windows') )
         uses: actions/upload-release-asset@v1
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: build\\photon.exe
-          asset_name: photon.exe
-          asset_content_type: application/octet-stream
+          asset_path: downloads/windows
+          asset_name: photon-windows.zip
+          asset_content_type: application/zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Ubuntu asset
+        if: steps.create_release.outcome == 'success' && (exists('downloads/ubuntu') )
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: downloads/ubuntu
+          asset_name: photon-ubuntu.tar.gz
+          asset_content_type: application/gzip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload macOS asset
+        if: steps.create_release.outcome == 'success' && (exists('downloads/macos') )
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: downloads/macos
+          asset_name: photon-macos.tar.gz
+          asset_content_type: application/gzip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Fedora asset
+        if: steps.create_release.outcome == 'success' && (exists('downloads/fedora') )
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: downloads/fedora
+          asset_name: photon-fedora.tar.gz
+          asset_content_type: application/gzip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Arch asset
+        if: steps.create_release.outcome == 'success' && (exists('downloads/arch') )
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: downloads/arch
+          asset_name: photon-arch.tar.gz
+          asset_content_type: application/gzip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
