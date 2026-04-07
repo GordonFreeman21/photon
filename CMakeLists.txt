@@ -28,9 +28,12 @@ else()
     add_compile_options(
         -Wall -Wextra -Wpedantic
         -O2
-        -msse4.2
         -ffast-math -funroll-loops
     )
+    # x86-only SIMD flags
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i686|i386")
+        add_compile_options(-msse4.2)
+    endif()
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         add_compile_options(-g -O0)
         # add_link_options(-fsanitize=address)
