@@ -1,0 +1,30 @@
+# Build artifacts
+/build/
+/build
+*.exe
+*.dll
+*.lib
+*.obj
+*.o
+*.pdb
+*.ilk
+*.ninja_deps
+*.ninja_log
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+build/
+# IDE
+.vscode/
+.vs/
+*.suo
+*.user
+# Archives
+*.zip
+# macOS
+.DS_Store
+# Logs
+*.log
+# Other
+photon_ci_branch.zip
