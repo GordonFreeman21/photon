@@ -96,8 +96,8 @@ jobs:
       - name: Package .rpm
         run: |
           mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-          install -Dm755 build/photon rpmbuild/BUILD/photon
-          cat > rpmbuild/SPECS/photon.spec << 'SPEC'
+          BIN_PATH="$GITHUB_WORKSPACE/build/photon"
+          cat > rpmbuild/SPECS/photon.spec << SPEC
           Name:    photon
           Version: 0.1.${{ github.run_number }}
           Release: 1
@@ -110,7 +110,7 @@ jobs:
 
           %install
           mkdir -p %{buildroot}/usr/bin
-          install -m 755 %{_builddir}/photon %{buildroot}/usr/bin/photon
+          install -m 755 ${BIN_PATH} %{buildroot}/usr/bin/photon
 
           %files
           /usr/bin/photon
