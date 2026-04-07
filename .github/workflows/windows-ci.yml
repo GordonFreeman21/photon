@@ -1,0 +1,37 @@
+name: Windows CI - Photon
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup vcpkg
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git vcpkg
+          .\vcpkg\bootstrap-vcpkg.bat
+
+      - name: Install deps (vcpkg)
+        shell: pwsh
+        run: |
+          .\vcpkg\vcpkg.exe install glfw3:x64-windows glm:x64-windows --recurse
+
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          mkdir build
+          cd build
+          $toolchain = "${{ github.workspace }}\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake"
+          cmake .. -G "Ninja" -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DUSE_VULKAN=OFF
+          ninja
+
+      - name: Run headless smoke test
+        shell: pwsh
+        run: |
+          if (Test-Path .\\build\\photon.exe) { .\\build\\photon.exe } else { Write-Host "binary missing"; exit 1 }
