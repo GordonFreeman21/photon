@@ -1,0 +1,58 @@
+name: Build and Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup vcpkg
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git vcpkg
+          .\vcpkg\bootstrap-vcpkg.bat
+
+      - name: Install deps (vcpkg)
+        shell: pwsh
+        run: |
+          .\vcpkg\vcpkg.exe install glfw3:x64-windows glm:x64-windows --recurse
+
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          mkdir build
+          cd build
+          $toolchain = "${{ github.workspace }}\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake"
+          cmake .. -G "Ninja" -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DUSE_VULKAN=OFF
+          ninja
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: v${{ github.run_number }}-${{ github.sha }}
+          release_name: Release ${{ github.ref_name }}-${{ github.run_number }}
+          body: Automated release by CI
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release asset
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: build\\photon.exe
+          asset_name: photon.exe
+          asset_content_type: application/octet-stream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
