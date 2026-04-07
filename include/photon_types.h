@@ -15,16 +15,23 @@
     #define PHOTON_ALIGN(x) __declspec(align(x))
     #define PHOTON_INLINE __forceinline
     #define PHOTON_PREFETCH(addr) _mm_prefetch((const char*)(addr), _MM_HINT_T0)
-#else
+#elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
     #include <immintrin.h>
+    #define PHOTON_ALIGN(x) __attribute__((aligned(x)))
+    #define PHOTON_INLINE static inline __attribute__((always_inline))
+    #define PHOTON_PREFETCH(addr) __builtin_prefetch(addr)
+#else
+    /* ARM64 / other architectures */
     #define PHOTON_ALIGN(x) __attribute__((aligned(x)))
     #define PHOTON_INLINE static inline __attribute__((always_inline))
     #define PHOTON_PREFETCH(addr) __builtin_prefetch(addr)
 #endif
 
-#include <xmmintrin.h>
-#include <smmintrin.h>
-#include <immintrin.h>
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+    #include <xmmintrin.h>
+    #include <smmintrin.h>
+    #include <immintrin.h>
+#endif
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
 /*  Constants                                                                 */
